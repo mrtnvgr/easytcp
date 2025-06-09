@@ -2,6 +2,11 @@
 name = "easytcp"
 version = "0.1.0"
 edition = "2024"
+description = "Create async network applications easily!"
+license = "GPL-3.0"
+repository = "https://github.com/mrtnvgr/easytcp/"
+keywords = ["networking", "async", "tokio", "tcp"]
+categories = ["network-programming", "asynchronous"]
 
 [dependencies]
 tokio = { version = "1.45.1", features = ["rt-multi-thread", "net", "io-util", "sync"] }
