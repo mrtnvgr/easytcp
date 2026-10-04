@@ -7,14 +7,19 @@ use crate::traits::ClientName;
 use crate::traits::Packet;
 use scc::HashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, Notify, RwLock, mpsc};
+use tokio::sync::{Mutex, Notify, mpsc};
 use tokio::task::AbortHandle;
+
+/// A single connected client's write half and its background read task.
+struct ClientEntry {
+    write_socket: OwnedWriteHalf,
+    read_task: AbortHandle,
+}
 
 /// A TCP server that manages authenticated clients.
 ///
@@ -24,9 +29,7 @@ use tokio::task::AbortHandle;
 /// Create a server with [`Server::new`] and start accepting connections with
 /// [`Server::start`].
 pub struct Server<C, S, N> {
-    connected_clients: Arc<RwLock<HashSet<Arc<N>>>>,
-    write_sockets: Arc<HashMap<Arc<N>, OwnedWriteHalf>>,
-    read_tasks: Arc<HashMap<Arc<N>, AbortHandle>>,
+    clients: HashMap<Arc<N>, ClientEntry>,
 
     tx: mpsc::Sender<(Arc<N>, C)>,
     rx: Mutex<mpsc::Receiver<(Arc<N>, C)>>,
@@ -46,16 +49,10 @@ where
     /// Creates a new server that is not yet accepting connections.
     #[must_use]
     pub fn new() -> Self {
-        let connected_clients = Arc::new(RwLock::new(HashSet::new()));
-        let write_sockets = Arc::new(HashMap::new());
-        let read_tasks = Arc::new(HashMap::new());
-
         let (tx, rx) = mpsc::channel(32);
 
         Self {
-            connected_clients,
-            write_sockets,
-            read_tasks,
+            clients: HashMap::new(),
 
             tx,
             rx: Mutex::new(rx),
@@ -83,17 +80,9 @@ where
 
         let token = Arc::new(token);
 
-        let connected_clients = Arc::clone(&self.connected_clients);
-        let write_sockets = Arc::clone(&self.write_sockets);
-        let read_tasks = Arc::clone(&self.read_tasks);
-
-        let tx = self.tx.clone();
-
         let server = Arc::clone(&self);
         let abort_handle = tokio::spawn(async move {
             loop {
-                let server = Arc::clone(&server);
-
                 let (socket, _) = match listener.accept().await {
                     Ok(accepted) => accepted,
                     Err(error) => {
@@ -103,51 +92,9 @@ where
                 };
 
                 match Self::handshake(&token, socket).await {
-                    Some((name, socket)) if !server.is_connected(&name).await => {
-                        let (mut sockread, sockwrite) = socket.into_split();
-
-                        let name = Arc::new(name);
-
-                        let _ = write_sockets.insert_async(name.clone(), sockwrite).await;
-
-                        // The read task must not start reading until the client
-                        // is fully registered. Otherwise a client that closes
-                        // immediately can be cleaned up by the task before the
-                        // registration below completes, leaving a stale entry.
-                        let ready = Arc::new(Notify::new());
-
-                        let name_cloned = Arc::clone(&name);
-                        let tx_cloned = tx.clone();
-                        let server_cloned = server.clone();
-                        let ready_cloned = Arc::clone(&ready);
-                        let read_task = tokio::spawn(async move {
-                            ready_cloned.notified().await;
-
-                            loop {
-                                let packet: Option<ClientPacket<N, C>> =
-                                    receive_packet(&mut sockread).await.ok();
-
-                                let _ = match packet {
-                                    Some(ClientPacket::Data(packet)) => {
-                                        // TODO: do not clone names
-                                        tx_cloned.send((name_cloned.clone(), packet)).await
-                                    }
-                                    _ => break,
-                                };
-                            }
-
-                            let _ = server_cloned.disconnect(&name_cloned).await;
-                            log::info!("Client {name_cloned:?} has been disconnected");
-                        })
-                        .abort_handle();
-
-                        let _ = read_tasks.insert_async(name.clone(), read_task).await;
-                        connected_clients.write().await.insert(name.clone());
-                        ready.notify_one();
-
-                        log::info!("Client {name:?} has connected");
+                    Some((name, socket)) => {
+                        Self::register(Arc::clone(&server), name, socket).await;
                     }
-                    Some((name, _)) => log::error!("Client {name:?} has already connected"),
                     None => log::error!("A client failed to connect"),
                 }
             }
@@ -157,6 +104,65 @@ where
         *(self.abort_handle.lock().await) = Some(abort_handle);
 
         Ok(())
+    }
+
+    /// Registers a freshly handshaken client and spawns its read task.
+    ///
+    /// Duplicate names are rejected: the existing client is left untouched and
+    /// the new connection is dropped.
+    async fn register(server: Arc<Self>, name: N, socket: TcpStream) {
+        let (mut sockread, sockwrite) = socket.into_split();
+
+        let name = Arc::new(name);
+
+        // The read task must not start reading until the client has been
+        // inserted into the registry. Otherwise a client that closes
+        // immediately can be cleaned up by the task before registration
+        // completes, leaving a stale entry.
+        let ready = Arc::new(Notify::new());
+
+        let name_cloned = Arc::clone(&name);
+        let tx_cloned = server.tx.clone();
+        let server_cloned = Arc::clone(&server);
+        let ready_cloned = Arc::clone(&ready);
+        let read_task = tokio::spawn(async move {
+            ready_cloned.notified().await;
+
+            loop {
+                let packet: Option<ClientPacket<N, C>> = receive_packet(&mut sockread).await.ok();
+
+                let _ = match packet {
+                    Some(ClientPacket::Data(packet)) => {
+                        // TODO: do not clone names
+                        tx_cloned.send((name_cloned.clone(), packet)).await
+                    }
+                    _ => break,
+                };
+            }
+
+            let _ = server_cloned.disconnect(&name_cloned).await;
+            log::info!("Client {name_cloned:?} has been disconnected");
+        })
+        .abort_handle();
+
+        let entry = ClientEntry {
+            write_socket: sockwrite,
+            read_task: read_task.clone(),
+        };
+
+        if server
+            .clients
+            .insert_async(name.clone(), entry)
+            .await
+            .is_err()
+        {
+            read_task.abort();
+            log::error!("Client {name:?} has already connected");
+            return;
+        }
+
+        ready.notify_one();
+        log::info!("Client {name:?} has connected");
     }
 
     /// Stops accepting new connections and disconnects every connected client.
@@ -185,19 +191,16 @@ where
     }
 
     async fn send_packet_raw(&self, client_name: &N, packet: ServerPacket<S>) -> Result<()> {
-        // Avoid race conditions
-        if !(self.is_connected(client_name).await) {
-            return Err(Error::NoSuchClient);
-        }
-
-        let Some(mut socket) = self.write_sockets.get_async(client_name).await else {
+        let Some(mut entry) = self.clients.get_async(client_name).await else {
             return Err(Error::NoSuchClient);
         };
 
-        let failed = send_packet(socket.get_mut(), &packet).await.is_err();
+        let failed = send_packet(&mut entry.get_mut().write_socket, &packet)
+            .await
+            .is_err();
 
         // Release the scc bucket guard before `disconnect` re-enters the map.
-        drop(socket);
+        drop(entry);
 
         if failed {
             self.disconnect(client_name).await?;
@@ -219,13 +222,7 @@ where
     /// one `(client_name, result)` entry per client that was connected when the
     /// call started, in an arbitrary order.
     pub async fn send_packet_to_everyone(&self, packet: S) -> Vec<(Arc<N>, Result<()>)> {
-        let clients: Vec<Arc<N>> = self
-            .connected_clients
-            .read()
-            .await
-            .iter()
-            .cloned()
-            .collect();
+        let clients = self.connected_names().await;
 
         let mut results = Vec::with_capacity(clients.len());
 
@@ -240,7 +237,7 @@ where
     /// Returns whether a client with the given name is currently connected.
     #[must_use]
     pub async fn is_connected(&self, client_name: &N) -> bool {
-        self.connected_clients.read().await.contains(client_name)
+        self.clients.contains_async(client_name).await
     }
 
     /// Disconnects the client identified by `client_name`.
@@ -250,30 +247,31 @@ where
     /// Returns [`Error::NoSuchClient`] if no client with that name is
     /// connected.
     pub async fn disconnect(&self, client_name: &N) -> Result<()> {
-        let was_connected = self.connected_clients.write().await.remove(client_name);
+        let Some((_, entry)) = self.clients.remove_async(client_name).await else {
+            return Err(Error::NoSuchClient);
+        };
 
-        self.write_sockets.remove_async(client_name).await;
+        entry.read_task.abort();
 
-        if let Some((_, read_task)) = self.read_tasks.remove_async(client_name).await {
-            read_task.abort();
-        }
-
-        was_connected.then_some(()).ok_or(Error::NoSuchClient)
+        Ok(())
     }
 
     /// Disconnects every connected client.
     pub async fn disconnect_everyone(&self) {
-        let clients: Vec<Arc<N>> = self
-            .connected_clients
-            .read()
-            .await
-            .iter()
-            .cloned()
-            .collect();
-
-        for client in clients {
+        for client in self.connected_names().await {
             let _ = self.disconnect(&client).await;
         }
+    }
+
+    /// Collects the names of the currently connected clients.
+    async fn connected_names(&self) -> Vec<Arc<N>> {
+        let mut names = Vec::new();
+
+        self.clients
+            .scan_async(|name, _| names.push(Arc::clone(name)))
+            .await;
+
+        names
     }
 
     async fn handshake(server_token: &Arc<Token>, mut socket: TcpStream) -> Option<(N, TcpStream)> {
