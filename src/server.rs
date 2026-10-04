@@ -320,7 +320,7 @@ pub(crate) enum InternalServerPacket {
 #[derive(Error, Debug)]
 pub enum Error {
     /// The listener could not bind to the requested address.
-    #[error("could not bind to addr")]
+    #[error("could not bind to address")]
     Bind(#[source] tokio::io::Error),
     /// The requested client is not connected.
     #[error("no such client connected")]

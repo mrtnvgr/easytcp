@@ -1,6 +1,6 @@
 use crate::error::TransportError;
 use crate::traits::Packet;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ErrorKind};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ErrorKind};
 
 type Result<T> = std::result::Result<T, TransportError>;
 
@@ -16,7 +16,7 @@ const MAX_PACKET_SIZE: usize = 8 * 1024 * 1024;
 /// Returns [`TransportError::PacketTooLarge`] if the encoded packet exceeds the
 /// maximum frame size, [`TransportError::Codec`] if it cannot be encoded, or
 /// [`TransportError::Io`] if the write fails.
-pub async fn send_packet<P: Packet, S: AsyncWriteExt + Unpin + Send>(
+pub async fn send_packet<P: Packet, S: AsyncWrite + Unpin + Send>(
     socket: &mut S,
     packet: &P,
 ) -> Result<()> {
