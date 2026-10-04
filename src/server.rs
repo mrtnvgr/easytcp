@@ -218,8 +218,16 @@ where
 
     /// Disconnects every connected client and consumes the server handle.
     pub async fn disconnect_everyone(self) {
-        for client in self.connected_clients.write().await.iter() {
-            let _ = self.disconnect(client).await;
+        let clients: Vec<Arc<N>> = self
+            .connected_clients
+            .read()
+            .await
+            .iter()
+            .cloned()
+            .collect();
+
+        for client in clients {
+            let _ = self.disconnect(&client).await;
         }
     }
 
