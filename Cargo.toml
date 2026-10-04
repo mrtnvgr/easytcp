@@ -19,6 +19,7 @@ trait-set = "0.3.0"
 thiserror = "2.0"
 scc = "2.3.4"
 sha2 = "0.10"
+subtle = "2.6"
 log = "0.4"
 
 [dev-dependencies]
