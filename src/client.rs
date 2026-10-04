@@ -1,3 +1,5 @@
+//! The client side of a connection.
+
 use crate::helpers::{receive_packet, send_packet};
 use crate::server::{InternalServerPacket, ServerPacket};
 use crate::token::Token;
@@ -12,9 +14,12 @@ use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::Mutex;
 
-// C - client packets
-// S - server packets
-// N - client name
+/// A connected client.
+///
+/// `C` is the type of packets sent by the client, `S` the type of packets
+/// received from the server, and `N` the type used to identify the client.
+///
+/// A `Client` is created with [`Client::connect`].
 pub struct Client<C, S, N> {
     sockwrite: Arc<Mutex<OwnedWriteHalf>>,
     sockread: Arc<Mutex<OwnedReadHalf>>,
@@ -30,6 +35,16 @@ where
     S: Packet,
     N: ClientName,
 {
+    /// Connects to the server at `addr` and completes the authentication
+    /// handshake using `token`.
+    ///
+    /// The `client_name` is sent to the server, which rejects the connection if
+    /// another client with the same name is already connected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::CouldntBind`] if the connection cannot be established,
+    /// or [`Error::NoResponse`] if the server does not confirm the handshake.
     pub async fn connect(client_name: N, addr: &str, token: Token) -> Result<Self> {
         log::debug!("Trying to connect to {addr} server...");
         let mut socket = TcpStream::connect(addr).await.map_err(Error::CouldntBind)?;
@@ -68,6 +83,9 @@ where
     //     }
     // }
 
+    /// Sends a packet to the server.
+    ///
+    /// The write is best-effort and any I/O failure is discarded.
     pub async fn send_packet(&self, packet: C) {
         let packet = ClientPacket::Data(packet);
         self.send_packet_guarded(&packet).await;
@@ -82,6 +100,12 @@ where
         send_packet(&mut (*(self.sockwrite.lock().await)), packet).await;
     }
 
+    /// Receives the next packet from the server.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Disconnected`] if the connection is closed or a
+    /// non-data control packet is received.
     pub async fn receive_packet(&self) -> Result<S> {
         let socket = &mut (*(self.sockread.lock().await));
         let packet: Option<ServerPacket<S>> = receive_packet(socket).await;
@@ -92,6 +116,8 @@ where
         }
     }
 
+    /// Notifies the server that the client is disconnecting and shuts down the
+    /// write half of the connection.
     pub async fn disconnect(self) {
         let internal_packet = InternalClientPacket::Disconnect;
         self.send_packet_internal(internal_packet).await;
@@ -119,14 +145,19 @@ pub(crate) enum InternalClientPacket<N> {
     Disconnect,
 }
 
+/// Errors that can occur on the client side.
 #[derive(Error, Debug)]
 pub enum Error {
+    /// The connection to the server could not be established.
     #[error("could not bind to addr")]
     CouldntBind(#[source] tokio::io::Error),
+    /// The server did not confirm the connection handshake.
     #[error("server does not respond")]
     NoResponse,
+    /// The connection to the server has been closed.
     #[error("the client has been disconnected")]
     Disconnected,
 }
 
+/// A specialized [`Result`](std::result::Result) type for client operations.
 pub type Result<T> = std::result::Result<T, Error>;

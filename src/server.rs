@@ -1,3 +1,5 @@
+//! The server side of a connection.
+
 use crate::client::{ClientPacket, InternalClientPacket};
 use crate::helpers::{receive_packet, send_packet};
 use crate::token::Token;
@@ -14,9 +16,13 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tokio::task::AbortHandle;
 
-// C - client packets
-// S - server packets
-// N - client name
+/// A TCP server that manages authenticated clients.
+///
+/// `C` is the type of packets received from clients, `S` the type of packets
+/// sent to clients, and `N` the type used to identify clients.
+///
+/// Create a server with [`Server::new`] and start accepting connections with
+/// [`Server::start`].
 pub struct Server<C, S, N> {
     connected_clients: Arc<RwLock<HashSet<Arc<N>>>>,
     write_sockets: Arc<HashMap<Arc<N>, OwnedWriteHalf>>,
@@ -37,6 +43,8 @@ where
     S: Packet,
     N: ClientName,
 {
+    /// Creates a new server that is not yet accepting connections.
+    #[must_use]
     pub fn new() -> Self {
         let connected_clients = Arc::new(RwLock::new(HashSet::new()));
         let write_sockets = Arc::new(HashMap::new());
@@ -59,6 +67,16 @@ where
         }
     }
 
+    /// Binds to `addr` and starts accepting client connections in the
+    /// background.
+    ///
+    /// Connections are authenticated against `token`. This method returns once
+    /// the listener is bound; incoming connections are handled by a spawned
+    /// task.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::CouldntBind`] if the address cannot be bound.
     pub async fn start(self: Arc<Self>, addr: &str, token: Token) -> Result<()> {
         log::trace!("Server started on {addr}");
         let listener = TcpListener::bind(addr).await.map_err(Error::CouldntBind)?;
@@ -122,6 +140,12 @@ where
         Ok(())
     }
 
+    /// Sends a packet to the client identified by `client_name`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoSuchClient`] if no client with that name is connected
+    /// or if the client is disconnected while sending.
     pub async fn send_packet(&self, client_name: &N, packet: S) -> Result<()> {
         let packet = ServerPacket::Data(packet);
         self.send_packet_raw(client_name, packet).await
@@ -144,10 +168,18 @@ where
         Ok(())
     }
 
+    /// Receives the next packet sent by any client.
+    ///
+    /// Returns `None` once every sender has been dropped.
     pub async fn receive_packet(&self) -> Option<(Arc<N>, C)> {
         self.rx.lock().await.recv().await
     }
 
+    /// Sends `packet` to every connected client.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if sending to any client fails.
     pub async fn send_packet_to_everyone(&self, packet: S) -> Result<()> {
         for client in self.connected_clients.read().await.iter() {
             self.send_packet(client, packet.clone()).await?;
@@ -156,10 +188,18 @@ where
         Ok(())
     }
 
+    /// Returns whether a client with the given name is currently connected.
+    #[must_use]
     pub async fn is_connected(&self, client_name: &N) -> bool {
         self.connected_clients.read().await.contains(client_name)
     }
 
+    /// Disconnects the client identified by `client_name`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoSuchClient`] if no client with that name is
+    /// connected.
     pub async fn disconnect(&self, client_name: &N) -> Result<()> {
         self.connected_clients
             .write()
@@ -176,6 +216,7 @@ where
         Ok(())
     }
 
+    /// Disconnects every connected client and consumes the server handle.
     pub async fn disconnect_everyone(self) {
         for client in self.connected_clients.write().await.iter() {
             let _ = self.disconnect(client).await;
@@ -228,12 +269,16 @@ pub(crate) enum InternalServerPacket {
     ConnectConfirm,
 }
 
+/// Errors that can occur on the server side.
 #[derive(Error, Debug)]
 pub enum Error {
+    /// The listener could not bind to the requested address.
     #[error("could not bind to addr")]
     CouldntBind(#[source] tokio::io::Error),
+    /// The requested client is not connected.
     #[error("no such client connected")]
     NoSuchClient,
 }
 
+/// A specialized [`Result`](std::result::Result) type for server operations.
 pub type Result<T> = std::result::Result<T, Error>;
