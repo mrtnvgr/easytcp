@@ -17,7 +17,7 @@ use tokio::task::AbortHandle;
 
 /// A single connected client's write half and its background read task.
 struct ClientEntry {
-    write_socket: OwnedWriteHalf,
+    write_socket: Arc<Mutex<OwnedWriteHalf>>,
     read_task: AbortHandle,
 }
 
@@ -146,7 +146,7 @@ where
         .abort_handle();
 
         let entry = ClientEntry {
-            write_socket: sockwrite,
+            write_socket: Arc::new(Mutex::new(sockwrite)),
             read_task: read_task.clone(),
         };
 
@@ -191,16 +191,17 @@ where
     }
 
     async fn send_packet_raw(&self, client_name: &N, packet: ServerPacket<S>) -> Result<()> {
-        let Some(mut entry) = self.clients.get_async(client_name).await else {
-            return Err(Error::NoSuchClient);
-        };
+        // Clone the write half out of the map so no `scc` bucket guard is held
+        // while awaiting the socket write.
+        let write_socket = self
+            .clients
+            .read_async(client_name, |_, entry| Arc::clone(&entry.write_socket))
+            .await
+            .ok_or(Error::NoSuchClient)?;
 
-        let failed = send_packet(&mut entry.get_mut().write_socket, &packet)
+        let failed = send_packet(&mut *write_socket.lock().await, &packet)
             .await
             .is_err();
-
-        // Release the scc bucket guard before `disconnect` re-enters the map.
-        drop(entry);
 
         if failed {
             self.disconnect(client_name).await?;
