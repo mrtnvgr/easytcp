@@ -13,7 +13,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{Mutex, Notify, RwLock, mpsc};
 use tokio::task::AbortHandle;
 
 /// A TCP server that manages authenticated clients.
@@ -101,12 +101,20 @@ where
                         let name = Arc::new(name);
 
                         let _ = write_sockets.insert_async(name.clone(), sockwrite).await;
-                        connected_clients.write().await.insert(name.clone());
+
+                        // The read task must not start reading until the client
+                        // is fully registered. Otherwise a client that closes
+                        // immediately can be cleaned up by the task before the
+                        // registration below completes, leaving a stale entry.
+                        let ready = Arc::new(Notify::new());
 
                         let name_cloned = Arc::clone(&name);
                         let tx_cloned = tx.clone();
                         let server_cloned = server.clone();
+                        let ready_cloned = Arc::clone(&ready);
                         let read_task = tokio::spawn(async move {
+                            ready_cloned.notified().await;
+
                             loop {
                                 let packet: Option<ClientPacket<N, C>> =
                                     receive_packet(&mut sockread).await;
@@ -126,6 +134,9 @@ where
                         .abort_handle();
 
                         let _ = read_tasks.insert_async(name.clone(), read_task).await;
+                        connected_clients.write().await.insert(name.clone());
+                        ready.notify_one();
+
                         log::info!("Client {name:?} has connected");
                     }
                     Some((name, _)) => log::error!("Client {name:?} has already connected"),
@@ -217,19 +228,15 @@ where
     /// Returns [`Error::NoSuchClient`] if no client with that name is
     /// connected.
     pub async fn disconnect(&self, client_name: &N) -> Result<()> {
-        self.connected_clients
-            .write()
-            .await
-            .remove(client_name)
-            .then_some(())
-            .ok_or(Error::NoSuchClient)?;
+        let was_connected = self.connected_clients.write().await.remove(client_name);
 
         self.write_sockets.remove_async(client_name).await;
 
-        let read_task = self.read_tasks.get(client_name).unwrap();
-        read_task.abort();
+        if let Some((_, read_task)) = self.read_tasks.remove_async(client_name).await {
+            read_task.abort();
+        }
 
-        Ok(())
+        was_connected.then_some(()).ok_or(Error::NoSuchClient)
     }
 
     /// Disconnects every connected client and consumes the server handle.
