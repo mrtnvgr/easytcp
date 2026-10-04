@@ -177,15 +177,26 @@ where
 
     /// Sends `packet` to every connected client.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if sending to any client fails.
-    pub async fn send_packet_to_everyone(&self, packet: S) -> Result<()> {
-        for client in self.connected_clients.read().await.iter() {
-            self.send_packet(client, packet.clone()).await?;
+    /// Every client is attempted even if some fail. The returned vector holds
+    /// one `(client_name, result)` entry per client that was connected when the
+    /// call started, in an arbitrary order.
+    pub async fn send_packet_to_everyone(&self, packet: S) -> Vec<(Arc<N>, Result<()>)> {
+        let clients: Vec<Arc<N>> = self
+            .connected_clients
+            .read()
+            .await
+            .iter()
+            .cloned()
+            .collect();
+
+        let mut results = Vec::with_capacity(clients.len());
+
+        for client in clients {
+            let result = self.send_packet(&client, packet.clone()).await;
+            results.push((client, result));
         }
 
-        Ok(())
+        results
     }
 
     /// Returns whether a client with the given name is currently connected.
