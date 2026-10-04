@@ -223,7 +223,7 @@ where
     /// one `(client_name, result)` entry per client that was connected when the
     /// call started, in an arbitrary order.
     pub async fn send_packet_to_everyone(&self, packet: S) -> Vec<(Arc<N>, Result<()>)> {
-        let clients = self.connected_names().await;
+        let clients = self.clients().await;
 
         let mut results = Vec::with_capacity(clients.len());
 
@@ -259,13 +259,16 @@ where
 
     /// Disconnects every connected client.
     pub async fn disconnect_everyone(&self) {
-        for client in self.connected_names().await {
+        for client in self.clients().await {
             let _ = self.disconnect(&client).await;
         }
     }
 
-    /// Collects the names of the currently connected clients.
-    async fn connected_names(&self) -> Vec<Arc<N>> {
+    /// Returns the names of all currently connected clients.
+    ///
+    /// The order of the returned names is arbitrary.
+    #[must_use]
+    pub async fn clients(&self) -> Vec<Arc<N>> {
         let mut names = Vec::new();
 
         self.clients
