@@ -20,5 +20,6 @@ pub mod client;
 pub mod server;
 pub mod token;
 
+mod error;
 mod helpers;
 mod traits;

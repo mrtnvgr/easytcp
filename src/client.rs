@@ -1,5 +1,6 @@
 //! The client side of a connection.
 
+use crate::error::TransportError;
 use crate::helpers::{receive_packet, send_packet};
 use crate::server::{InternalServerPacket, ServerPacket};
 use crate::token::Token;
@@ -43,20 +44,19 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::CouldntBind`] if the connection cannot be established,
-    /// or [`Error::NoResponse`] if the server does not confirm the handshake.
+    /// Returns [`Error::Connect`] if the connection cannot be established,
+    /// [`Error::Io`] if the handshake cannot be exchanged, or
+    /// [`Error::NoResponse`] if the server does not confirm the handshake.
     pub async fn connect(client_name: N, addr: &str, token: Token) -> Result<Self> {
         log::debug!("Trying to connect to {addr} server...");
-        let mut socket = TcpStream::connect(addr).await.map_err(Error::CouldntBind)?;
+        let mut socket = TcpStream::connect(addr).await.map_err(Error::Connect)?;
 
         let internal_packet = InternalClientPacket::ConnectRequest { token, client_name };
         let packet: ClientPacket<N, C> = ClientPacket::Internal(internal_packet);
-        send_packet(&mut socket, &packet)
-            .await
-            .ok_or(Error::NoResponse)?;
+        send_packet(&mut socket, &packet).await?;
 
-        let received_packet: Option<ServerPacket<S>> = receive_packet(&mut socket).await;
-        if !is_connect_confirm(received_packet.as_ref()) {
+        let received_packet: ServerPacket<S> = receive_packet(&mut socket).await?;
+        if !is_connect_confirm(&received_packet) {
             return Err(Error::NoResponse);
         }
 
@@ -85,19 +85,22 @@ where
 
     /// Sends a packet to the server.
     ///
-    /// The write is best-effort and any I/O failure is discarded.
-    pub async fn send_packet(&self, packet: C) {
+    /// # Errors
+    ///
+    /// Returns [`Error::PacketTooLarge`] if the packet exceeds the maximum frame
+    /// size, or [`Error::Io`] if the write fails.
+    pub async fn send_packet(&self, packet: C) -> Result<()> {
         let packet = ClientPacket::Data(packet);
-        self.send_packet_guarded(&packet).await;
+        self.send_packet_guarded(&packet).await
     }
 
-    async fn send_packet_internal(&self, packet: InternalClientPacket<N>) {
+    async fn send_packet_internal(&self, packet: InternalClientPacket<N>) -> Result<()> {
         let packet = ClientPacket::Internal(packet);
-        self.send_packet_guarded(&packet).await;
+        self.send_packet_guarded(&packet).await
     }
 
-    async fn send_packet_guarded(&self, packet: &ClientPacket<N, C>) {
-        send_packet(&mut (*(self.sockwrite.lock().await)), packet).await;
+    async fn send_packet_guarded(&self, packet: &ClientPacket<N, C>) -> Result<()> {
+        Ok(send_packet(&mut (*(self.sockwrite.lock().await)), packet).await?)
     }
 
     /// Receives the next packet from the server.
@@ -108,11 +111,11 @@ where
     /// non-data control packet is received.
     pub async fn receive_packet(&self) -> Result<S> {
         let socket = &mut (*(self.sockread.lock().await));
-        let packet: Option<ServerPacket<S>> = receive_packet(socket).await;
+        let packet: ServerPacket<S> = receive_packet(socket).await?;
 
         match packet {
-            Some(ServerPacket::Data(packet)) => Ok(packet),
-            Some(ServerPacket::Internal(_)) | None => Err(Error::Disconnected),
+            ServerPacket::Data(packet) => Ok(packet),
+            ServerPacket::Internal(_) => Err(Error::Disconnected),
         }
     }
 
@@ -120,16 +123,16 @@ where
     /// write half of the connection.
     pub async fn disconnect(self) {
         let internal_packet = InternalClientPacket::Disconnect;
-        self.send_packet_internal(internal_packet).await;
+        let _ = self.send_packet_internal(internal_packet).await;
 
         let _ = self.sockwrite.lock().await.shutdown().await;
     }
 }
 
-const fn is_connect_confirm<S: Packet>(packet: Option<&ServerPacket<S>>) -> bool {
+const fn is_connect_confirm<S: Packet>(packet: &ServerPacket<S>) -> bool {
     matches!(
         packet,
-        Some(ServerPacket::Internal(InternalServerPacket::ConnectConfirm))
+        ServerPacket::Internal(InternalServerPacket::ConnectConfirm)
     )
 }
 
@@ -149,14 +152,34 @@ pub(crate) enum InternalClientPacket<N> {
 #[derive(Error, Debug)]
 pub enum Error {
     /// The connection to the server could not be established.
-    #[error("could not bind to addr")]
-    CouldntBind(#[source] tokio::io::Error),
+    #[error("could not connect to server")]
+    Connect(#[source] tokio::io::Error),
     /// The server did not confirm the connection handshake.
     #[error("server does not respond")]
     NoResponse,
     /// The connection to the server has been closed.
-    #[error("the client has been disconnected")]
+    #[error("the connection has been disconnected")]
     Disconnected,
+    /// An I/O error occurred while transferring a packet.
+    #[error("packet I/O error")]
+    Io(#[source] tokio::io::Error),
+    /// A packet exceeded the maximum allowed frame size.
+    #[error("packet exceeds the maximum frame size")]
+    PacketTooLarge,
+    /// A packet could not be encoded or decoded.
+    #[error("could not encode or decode packet")]
+    Codec(#[source] postcard::Error),
+}
+
+impl From<TransportError> for Error {
+    fn from(error: TransportError) -> Self {
+        match error {
+            TransportError::Io(error) => Self::Io(error),
+            TransportError::Disconnected => Self::Disconnected,
+            TransportError::PacketTooLarge => Self::PacketTooLarge,
+            TransportError::Codec(error) => Self::Codec(error),
+        }
+    }
 }
 
 /// A specialized [`Result`](std::result::Result) type for client operations.

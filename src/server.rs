@@ -76,10 +76,10 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::CouldntBind`] if the address cannot be bound.
+    /// Returns [`Error::Bind`] if the address cannot be bound.
     pub async fn start(self: Arc<Self>, addr: &str, token: Token) -> Result<()> {
         log::trace!("Server started on {addr}");
-        let listener = TcpListener::bind(addr).await.map_err(Error::CouldntBind)?;
+        let listener = TcpListener::bind(addr).await.map_err(Error::Bind)?;
 
         let token = Arc::new(token);
 
@@ -125,7 +125,7 @@ where
 
                             loop {
                                 let packet: Option<ClientPacket<N, C>> =
-                                    receive_packet(&mut sockread).await;
+                                    receive_packet(&mut sockread).await.ok();
 
                                 let _ = match packet {
                                     Some(ClientPacket::Data(packet)) => {
@@ -180,7 +180,7 @@ where
             return Err(Error::NoSuchClient);
         };
 
-        let failed = send_packet(socket.get_mut(), &packet).await.is_none();
+        let failed = send_packet(socket.get_mut(), &packet).await.is_err();
 
         // Release the scc bucket guard before `disconnect` re-enters the map.
         drop(socket);
@@ -263,7 +263,7 @@ where
     }
 
     async fn handshake(server_token: &Arc<Token>, mut socket: TcpStream) -> Option<(N, TcpStream)> {
-        let packet: ClientPacket<N, C> = receive_packet(&mut socket).await?;
+        let packet: ClientPacket<N, C> = receive_packet(&mut socket).await.ok()?;
 
         match packet {
             ClientPacket::Internal(InternalClientPacket::ConnectRequest { token, client_name })
@@ -274,7 +274,7 @@ where
 
                 let response = send_packet(&mut socket, &packet).await;
                 let connected_client = Some((client_name, socket));
-                response.and(connected_client)
+                response.ok().and(connected_client)
             }
             _ => None,
         }
@@ -308,7 +308,7 @@ pub(crate) enum InternalServerPacket {
 pub enum Error {
     /// The listener could not bind to the requested address.
     #[error("could not bind to addr")]
-    CouldntBind(#[source] tokio::io::Error),
+    Bind(#[source] tokio::io::Error),
     /// The requested client is not connected.
     #[error("no such client connected")]
     NoSuchClient,
