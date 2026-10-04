@@ -157,12 +157,17 @@ where
             return Err(Error::NoSuchClient);
         }
 
-        if let Some(mut socket) = self.write_sockets.get_async(client_name).await {
-            if send_packet(socket.get_mut(), &packet).await.is_none() {
-                self.disconnect(client_name).await?;
-            }
-        } else {
+        let Some(mut socket) = self.write_sockets.get_async(client_name).await else {
             return Err(Error::NoSuchClient);
+        };
+
+        let failed = send_packet(socket.get_mut(), &packet).await.is_none();
+
+        // Release the scc bucket guard before `disconnect` re-enters the map.
+        drop(socket);
+
+        if failed {
+            self.disconnect(client_name).await?;
         }
 
         Ok(())
