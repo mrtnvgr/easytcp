@@ -2,9 +2,12 @@
 name = "easytcp"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Create async network applications easily!"
 license = "GPL-3.0"
 repository = "https://github.com/mrtnvgr/easytcp/"
+readme = "README.md"
+documentation = "https://docs.rs/easytcp"
 keywords = ["networking", "async", "tokio", "tcp"]
 categories = ["network-programming", "asynchronous"]
 
@@ -17,3 +20,6 @@ thiserror = "2.0"
 scc = "2.3.4"
 sha2 = "0.10"
 log = "0.4"
+
+[dev-dependencies]
+tokio = { version = "1.45.1", features = ["macros", "rt-multi-thread", "time"] }
