@@ -94,7 +94,15 @@ where
             loop {
                 let server = Arc::clone(&server);
 
-                match Self::accept_client(&token, &listener).await {
+                let (socket, _) = match listener.accept().await {
+                    Ok(accepted) => accepted,
+                    Err(error) => {
+                        log::error!("Failed to accept a connection: {error}");
+                        continue;
+                    }
+                };
+
+                match Self::handshake(&token, socket).await {
                     Some((name, socket)) if !server.is_connected(&name).await => {
                         let (mut sockread, sockwrite) = socket.into_split();
 
@@ -254,12 +262,7 @@ where
         }
     }
 
-    async fn accept_client(
-        server_token: &Arc<Token>,
-        listener: &TcpListener,
-    ) -> Option<(N, TcpStream)> {
-        let (mut socket, _) = listener.accept().await.unwrap();
-
+    async fn handshake(server_token: &Arc<Token>, mut socket: TcpStream) -> Option<(N, TcpStream)> {
         let packet: ClientPacket<N, C> = receive_packet(&mut socket).await?;
 
         match packet {
