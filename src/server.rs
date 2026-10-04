@@ -159,6 +159,20 @@ where
         Ok(())
     }
 
+    /// Stops accepting new connections and disconnects every connected client.
+    ///
+    /// This aborts the background accept loop, which releases the server's
+    /// internal `Arc<Self>` so the server can be dropped normally afterwards.
+    /// Calling `shutdown` on a server that was never started is a no-op.
+    /// TODO(some-time-later-for-now-ignore): shutdown should consume the server
+    pub async fn shutdown(&self) {
+        if let Some(abort_handle) = self.abort_handle.lock().await.take() {
+            abort_handle.abort();
+        }
+
+        self.disconnect_everyone().await;
+    }
+
     /// Sends a packet to the client identified by `client_name`.
     ///
     /// # Errors
@@ -247,8 +261,8 @@ where
         was_connected.then_some(()).ok_or(Error::NoSuchClient)
     }
 
-    /// Disconnects every connected client and consumes the server handle.
-    pub async fn disconnect_everyone(self) {
+    /// Disconnects every connected client.
+    pub async fn disconnect_everyone(&self) {
         let clients: Vec<Arc<N>> = self
             .connected_clients
             .read()
