@@ -8,7 +8,6 @@ use crate::traits::ClientName;
 use crate::traits::Packet;
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
-use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -22,12 +21,10 @@ use tokio::sync::Mutex;
 ///
 /// A `Client` is created with [`Client::connect`].
 pub struct Client<C, S, N> {
-    sockwrite: Arc<Mutex<OwnedWriteHalf>>,
-    sockread: Arc<Mutex<OwnedReadHalf>>,
+    sockwrite: Mutex<OwnedWriteHalf>,
+    sockread: Mutex<OwnedReadHalf>,
 
-    phantom: PhantomData<C>,
-    phantom2: PhantomData<S>,
-    phantom3: PhantomData<N>,
+    _packets: PhantomData<(C, S, N)>,
 }
 
 impl<C, S, N> Client<C, S, N>
@@ -65,12 +62,10 @@ where
         let (sockread, sockwrite) = socket.into_split();
 
         Ok(Self {
-            sockwrite: Arc::new(Mutex::new(sockwrite)),
-            sockread: Arc::new(Mutex::new(sockread)),
+            sockwrite: Mutex::new(sockwrite),
+            sockread: Mutex::new(sockread),
 
-            phantom: PhantomData,
-            phantom2: PhantomData,
-            phantom3: PhantomData,
+            _packets: PhantomData,
         })
     }
 
