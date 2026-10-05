@@ -279,11 +279,20 @@ where
     }
 
     async fn handshake(server_token: &Arc<Token>, mut socket: TcpStream) -> Option<(N, TcpStream)> {
+        // Send a fresh nonce so a captured response cannot be replayed.
+        let mut nonce = [0_u8; 32];
+        getrandom::getrandom(&mut nonce).ok()?;
+
+        let challenge: ServerPacket<S> = ServerPacket::Internal(InternalServerPacket::Challenge {
+            nonce: nonce.to_vec(),
+        });
+        send_packet(&mut socket, &challenge).await.ok()?;
+
         let packet: ClientPacket<N, C> = receive_packet(&mut socket).await.ok()?;
 
         match packet {
-            ClientPacket::Internal(InternalClientPacket::ConnectRequest { token, client_name })
-                if **server_token == token =>
+            ClientPacket::Internal(InternalClientPacket::ConnectResponse { client_name, mac })
+                if server_token.verify_mac(&nonce, &mac) =>
             {
                 let internal_packet = InternalServerPacket::ConnectConfirm;
                 let packet: ServerPacket<S> = ServerPacket::Internal(internal_packet);
@@ -316,6 +325,7 @@ pub(crate) enum ServerPacket<P> {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub(crate) enum InternalServerPacket {
+    Challenge { nonce: Vec<u8> },
     ConnectConfirm,
 }
 

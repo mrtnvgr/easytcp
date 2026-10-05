@@ -39,21 +39,39 @@ where
     /// The `client_name` is sent to the server, which rejects the connection if
     /// another client with the same name is already connected.
     ///
+    /// The handshake is a challenge-response exchange: the server sends a
+    /// random nonce, the client proves knowledge of `token` by answering with
+    /// an HMAC of it, and the server confirms. This prevents replay of captured
+    /// handshakes.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Connect`] if the connection cannot be established,
     /// [`Error::Io`] if the handshake cannot be exchanged, or
-    /// [`Error::NoResponse`] if the server does not confirm the handshake.
+    /// [`Error::NoResponse`] if the server rejects or does not confirm the
+    /// handshake.
     pub async fn connect(client_name: N, addr: &str, token: Token) -> Result<Self> {
         log::debug!("Trying to connect to {addr} server...");
         let mut socket = TcpStream::connect(addr).await.map_err(Error::Connect)?;
 
-        let internal_packet = InternalClientPacket::ConnectRequest { token, client_name };
-        let packet: ClientPacket<N, C> = ClientPacket::Internal(internal_packet);
-        send_packet(&mut socket, &packet).await?;
+        // The server opens the handshake with a fresh random nonce.
+        let challenge: ServerPacket<S> = receive_packet(&mut socket).await?;
+        let nonce = match challenge {
+            ServerPacket::Internal(InternalServerPacket::Challenge { nonce }) => nonce,
+            _ => return Err(Error::NoResponse),
+        };
 
-        let received_packet: ServerPacket<S> = receive_packet(&mut socket).await?;
-        if !is_connect_confirm(&received_packet) {
+        let mac = token.compute_mac(&nonce);
+        let response: ClientPacket<N, C> =
+            ClientPacket::Internal(InternalClientPacket::ConnectResponse { client_name, mac });
+        send_packet(&mut socket, &response).await?;
+
+        let confirmed = match receive_packet::<ServerPacket<S>, _>(&mut socket).await {
+            Ok(packet) => is_connect_confirm(&packet),
+            Err(_) => false,
+        };
+
+        if !confirmed {
             return Err(Error::NoResponse);
         }
 
@@ -139,7 +157,7 @@ pub(crate) enum ClientPacket<N, P> {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub(crate) enum InternalClientPacket<N> {
-    ConnectRequest { token: Token, client_name: N },
+    ConnectResponse { client_name: N, mac: Vec<u8> },
     Disconnect,
 }
 

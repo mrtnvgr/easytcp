@@ -1,14 +1,25 @@
 //! Pre-shared authentication tokens.
 
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
+type HmacSha256 = Hmac<Sha256>;
+
 /// A pre-shared authentication token.
 ///
 /// A token is created from a secret string with [`Token::new`]. The secret is
-/// hashed with SHA-256 and only the digest is stored and exchanged, so the raw
-/// secret is never kept in memory.
+/// hashed with SHA-256 and only the digest is stored, so the raw secret is never
+/// kept in memory.
+///
+/// During the connection handshake the server sends a random nonce and the
+/// client answers with an HMAC of that nonce keyed by the token. Because the
+/// nonce is fresh for every connection, a captured response cannot be replayed.
+///
+/// This authenticates the client to the server but does not encrypt traffic or
+/// protect against an active man-in-the-middle; use a secure transport such as
+/// TLS when those properties are required.
 ///
 /// Equality is constant-time, so comparing tokens does not leak information
 /// through timing.
@@ -23,6 +34,19 @@ impl Token {
     pub fn new(token: &str) -> Self {
         let inner = Sha256::digest(token.as_bytes()).to_vec();
         Self { inner }
+    }
+
+    /// Computes the HMAC-SHA256 of `nonce` keyed by this token.
+    pub(crate) fn compute_mac(&self, nonce: &[u8]) -> Vec<u8> {
+        let mut mac =
+            HmacSha256::new_from_slice(&self.inner).expect("HMAC accepts keys of any length");
+        mac.update(nonce);
+        mac.finalize().into_bytes().to_vec()
+    }
+
+    /// Verifies `tag` against the HMAC-SHA256 of `nonce`, in constant time.
+    pub(crate) fn verify_mac(&self, nonce: &[u8], tag: &[u8]) -> bool {
+        self.compute_mac(nonce).as_slice().ct_eq(tag).into()
     }
 }
 
