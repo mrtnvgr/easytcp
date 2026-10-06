@@ -97,7 +97,7 @@ async fn duplicate_name_is_rejected() {
     let second = TestClient::connect(name("dup"), &addr.to_string(), token).await;
 
     assert!(second.is_err());
-    assert_eq!(server.clients().await.len(), 1);
+    assert_eq!(server.clients().len(), 1);
 
     server.shutdown().await;
 }

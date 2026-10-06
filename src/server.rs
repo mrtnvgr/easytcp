@@ -239,7 +239,7 @@ where
     /// one `(client_name, result)` entry per client that was connected when the
     /// call started, in an arbitrary order.
     pub async fn send_packet_to_everyone(&self, packet: S) -> Vec<(Arc<N>, Result<()>)> {
-        let clients = self.clients().await;
+        let clients = self.clients();
 
         let mut results = Vec::with_capacity(clients.len());
 
@@ -275,7 +275,7 @@ where
 
     /// Disconnects every connected client.
     pub async fn disconnect_everyone(&self) {
-        for client in self.clients().await {
+        for client in self.clients() {
             let _ = self.disconnect(&client).await;
         }
     }
@@ -284,12 +284,13 @@ where
     ///
     /// The order of the returned names is arbitrary.
     #[must_use]
-    pub async fn clients(&self) -> Vec<Arc<N>> {
-        let mut names = Vec::new();
+    pub fn clients(&self) -> Vec<Arc<N>> {
+        let mut names = Vec::with_capacity(self.clients.len());
 
-        self.clients
-            .scan_async(|name, _| names.push(Arc::clone(name)))
-            .await;
+        self.clients.iter_sync(|name, _| {
+            names.push(Arc::clone(name));
+            true
+        });
 
         names
     }
@@ -297,7 +298,10 @@ where
     async fn handshake(server_token: &Arc<Token>, mut socket: TcpStream) -> Option<(N, TcpStream)> {
         // Send a fresh nonce so a captured response cannot be replayed.
         let mut nonce = [0_u8; 32];
-        getrandom::getrandom(&mut nonce).ok()?;
+        if let Err(error) = getrandom::fill(&mut nonce) {
+            log::error!("Failed to generate handshake nonce: {error}");
+            return None;
+        }
 
         let challenge: ServerPacket<S> = ServerPacket::Internal(InternalServerPacket::Challenge {
             nonce: nonce.to_vec(),
