@@ -4,6 +4,12 @@
 
 Any type that implements serde's `Serialize`/`Deserialize` can be a packet.
 
+Client name is a *(de)serializable* type too, this can be used to:
+
+- Allow for any client name via `String` type.
+- Allow for a limited clients using an enum. (e.g. `Id::Home`, `Id::Work`).
+- ...
+
 ## Installation
 
 ```console
