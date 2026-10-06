@@ -57,3 +57,32 @@ impl PartialEq for Token {
 }
 
 impl Eq for Token {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mac_is_bound_to_the_nonce() {
+        let token = Token::new("secret");
+        let mac = token.compute_mac(b"nonce-a");
+
+        assert!(token.verify_mac(b"nonce-a", &mac));
+        assert!(!token.verify_mac(b"nonce-b", &mac));
+    }
+
+    #[test]
+    fn mac_requires_the_right_token() {
+        let token = Token::new("secret");
+        let other = Token::new("other");
+        let mac = token.compute_mac(b"nonce");
+
+        assert!(!other.verify_mac(b"nonce", &mac));
+    }
+
+    #[test]
+    fn equality_is_by_secret() {
+        assert!(Token::new("a") == Token::new("a"));
+        assert!(Token::new("a") != Token::new("b"));
+    }
+}

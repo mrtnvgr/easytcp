@@ -8,6 +8,7 @@ use crate::traits::Packet;
 use scc::HashMap;
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::tcp::OwnedWriteHalf;
@@ -69,14 +70,16 @@ where
     ///
     /// Connections are authenticated against `token`. This method returns once
     /// the listener is bound; incoming connections are handled by a spawned
-    /// task.
+    /// task. It returns the local address the server is listening on, which is
+    /// useful when binding to port `0`.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Bind`] if the address cannot be bound.
-    pub async fn start(self: Arc<Self>, addr: &str, token: Token) -> Result<()> {
+    pub async fn start(self: Arc<Self>, addr: &str, token: Token) -> Result<SocketAddr> {
         log::trace!("Server started on {addr}");
         let listener = TcpListener::bind(addr).await.map_err(Error::Bind)?;
+        let local_addr = listener.local_addr().map_err(Error::Bind)?;
 
         let token = Arc::new(token);
 
@@ -103,7 +106,7 @@ where
 
         *(self.abort_handle.lock().await) = Some(abort_handle);
 
-        Ok(())
+        Ok(local_addr)
     }
 
     /// Registers a freshly handshaken client and spawns its read task.
@@ -145,8 +148,10 @@ where
         })
         .abort_handle();
 
+        let write_socket = Arc::new(Mutex::new(sockwrite));
+
         let entry = ClientEntry {
-            write_socket: Arc::new(Mutex::new(sockwrite)),
+            write_socket: Arc::clone(&write_socket),
             read_task: read_task.clone(),
         };
 
@@ -158,6 +163,17 @@ where
         {
             read_task.abort();
             log::error!("Client {name:?} has already connected");
+            return;
+        }
+
+        // Confirm only after the client has been registered, so a rejected
+        // duplicate never receives a confirmation.
+        let confirm: ServerPacket<S> = ServerPacket::Internal(InternalServerPacket::ConnectConfirm);
+        if send_packet(&mut *write_socket.lock().await, &confirm)
+            .await
+            .is_err()
+        {
+            let _ = server.disconnect(&name).await;
             return;
         }
 
@@ -294,12 +310,7 @@ where
             ClientPacket::Internal(InternalClientPacket::ConnectResponse { client_name, mac })
                 if server_token.verify_mac(&nonce, &mac) =>
             {
-                let internal_packet = InternalServerPacket::ConnectConfirm;
-                let packet: ServerPacket<S> = ServerPacket::Internal(internal_packet);
-
-                let response = send_packet(&mut socket, &packet).await;
-                let connected_client = Some((client_name, socket));
-                response.ok().and(connected_client)
+                Some((client_name, socket))
             }
             _ => None,
         }

@@ -84,3 +84,56 @@ fn to_bytes<P: Packet>(packet: &P) -> Result<Vec<u8>> {
 
     Ok(data)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+    struct Msg(u32);
+
+    #[tokio::test]
+    async fn rejects_oversized_frame() {
+        let length = u32::try_from(MAX_PACKET_SIZE).unwrap() + 1;
+        let bytes = length.to_be_bytes();
+        let mut reader: &[u8] = &bytes;
+
+        let result = receive_packet::<Msg, _>(&mut reader).await;
+
+        assert!(matches!(result, Err(TransportError::PacketTooLarge)));
+    }
+
+    #[tokio::test]
+    async fn rejects_trailing_bytes() {
+        let mut payload = postcard::to_stdvec(&Msg(7)).unwrap();
+        payload.push(0);
+
+        let mut frame = u32::try_from(payload.len()).unwrap().to_be_bytes().to_vec();
+        frame.extend(payload);
+
+        let mut reader: &[u8] = &frame;
+        let result = receive_packet::<Msg, _>(&mut reader).await;
+
+        assert!(matches!(result, Err(TransportError::Codec(_))));
+    }
+
+    #[tokio::test]
+    async fn empty_stream_is_disconnected() {
+        let mut reader: &[u8] = &[];
+
+        let result = receive_packet::<Msg, _>(&mut reader).await;
+
+        assert!(matches!(result, Err(TransportError::Disconnected)));
+    }
+
+    #[tokio::test]
+    async fn roundtrips_a_frame() {
+        let data = to_bytes(&Msg(42)).unwrap();
+        let mut reader: &[u8] = &data;
+
+        let packet: Msg = receive_packet(&mut reader).await.unwrap();
+
+        assert_eq!(packet, Msg(42));
+    }
+}
